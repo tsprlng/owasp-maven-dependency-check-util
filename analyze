@@ -1,0 +1,9 @@
+#!/usr/bin/env ruby
+
+MyDir = __dir__
+
+Dir.chdir ARGV.first do
+	Dir['**/pom.xml'].each do |pom|
+		puts pom
+	end
+end
