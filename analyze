@@ -1,9 +1,80 @@
 #!/usr/bin/env ruby
 
+require 'fileutils'
+require 'rexml'
+require 'set'
+
 MyDir = __dir__
+WorkDir = File.join(MyDir, 'work')
+
+class REXML::Element
+	def get_one_element(xpath)
+		els = get_elements(xpath)
+		raise "No #{xpath}" if els.length==0
+		raise "More than one #{xpath}" if els.length>1
+		els.first
+	end
+end
+
+$projectRepoArtifacts = Set.new
+def artifactRepr(groupId, artifactId)
+	{artifact: artifactId, group: groupId}
+end
+
+OwaspDep = REXML::Element.new('dependency')
+OwaspDep.add_element('groupId').text = 'org.owasp'
+OwaspDep.add_element('artifactId').text = 'dependency-check-maven'
+OwaspDep.add_element('version').text = '7.1.0'
+OwaspDep.add_element('type').text = 'maven-plugin'
 
 Dir.chdir ARGV.first do
 	Dir['**/pom.xml'].each do |pom|
+		dest_dir = File.dirname(pom)
 		puts pom
+		root = REXML::Document::new(File.read(pom)).root
+		raise "#{pom} doesn't have <project> at root" unless root.xpath == '/project'
+
+		$projectRepoArtifacts << artifactRepr(
+			(root.get_one_element('groupId') rescue root.get_one_element('parent/groupId')).text,
+			root.get_one_element('artifactId').text,
+		)
+
+		FileUtils.mkdir_p(File.join(WorkDir, dest_dir)) unless dest_dir == '.'
+		FileUtils.cp(pom, File.join(WorkDir, pom))
 	end
+end
+
+puts $projectRepoArtifacts.to_a
+Dir.chdir WorkDir do
+	Dir['**/pom.xml'].each do |pom|
+		root = REXML::Document::new(File.read(File.join(WorkDir, pom))).root
+		raise "#{pom} doesn't have <project> at root" unless root.xpath == '/project'
+
+		deps = root.get_one_element('dependencies')
+		seen_owasp = false
+		deps.each_element('dependency') do |dep|
+			group = dep.get_one_element('groupId').text
+			artifact = dep.get_one_element('artifactId').text
+			if artifactRepr('org.owasp','dependency-check-maven') == artifactRepr(group, artifact)
+				seen_owasp = true
+			end
+			if $projectRepoArtifacts.include?(artifactRepr(group, artifact))
+				$stderr.puts "Removing ref to #{artifact} from #{pom}"
+				deps.delete_element(dep)
+			end
+		end
+		if pom == 'pom.xml' and not seen_owasp
+			$stderr.puts "Injecting ref to owasp dependency-check-maven into #{pom}"
+			deps.add_element(OwaspDep)
+		end
+
+		$stderr.puts "Writing #{pom}"
+		File.open(pom, 'w') do |output_file|
+			root.document.write(output_file)
+		end
+	end
+end
+
+Dir.chdir WorkDir do
+	exec 'mvn org.owasp:dependency-check-maven:check'
 end
